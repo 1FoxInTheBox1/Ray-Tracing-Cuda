@@ -13,4 +13,6 @@ target_sources(${PROJECT_NAME}
     src/vec3.cu
     include/color.cuh
     src/color.cu
+    include/ray.cuh
+    src/ray.cu
     )
