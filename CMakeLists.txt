@@ -6,13 +6,3 @@ set(CMAKE_CUDA_ARCHITECTURES 75)
 # include_directories(include)
 
 add_executable(${PROJECT_NAME} src/main.cu)
-
-target_sources(${PROJECT_NAME}
-    PRIVATE
-    include/vec3.cuh
-    src/vec3.cu
-    include/color.cuh
-    src/color.cu
-    include/ray.cuh
-    src/ray.cu
-    )

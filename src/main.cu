@@ -1,100 +1,46 @@
-#include "../include/color.cuh"
-#include "../include/ray.cuh"
-#include "../include/vec3.cuh"
 
-#include <iostream>
+#include "../include/rtweekend.cuh"
 
-#define checkCudaErrors(val) check_cuda((val), #val, __FILE__, __LINE__)
-void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line)
-{
-    if (result)
-    {
-        std::cerr << "CUDA error = " << static_cast<unsigned int>(result) << " at " << file << ":" << line << " '" << func << "' \n";
-        // Make sure we call CUDA Device Reset before exiting
-        cudaDeviceReset();
-        exit(99);
-    }
-}
+#include "../include/camera.cuh"
+#include "../include/hittable.cuh"
+#include "../include/hittable_list.cuh"
+#include "../include/sphere.cuh"
 
-__device__ bool hit_sphere(const point3& center, double radius, const ray& r) {
-    vec3 oc = center - r.origin();
-    auto a = dot(r.direction(), r.direction());
-    auto b = -2.0 * dot(r.direction(), oc);
-    auto c = dot(oc, oc) - radius*radius;
-    auto discriminant = b*b - 4*a*c;
-    return (discriminant >= 0);
-}
-
-__device__ color ray_color(const ray &r)
-{
-    if (hit_sphere(point3(0,0,-1), 0.5, r))
-        return color(1, 0, 0);
-
-    vec3 unit_direction = unit_vector(r.direction());
-    auto a = 0.5*(unit_direction.y() + 1.0);
-    return (1.0-a)*color(1.0, 1.0, 1.0) + a*color(0.5, 0.7, 1.0);
-}
-
-__global__ void render(color *fb, int image_width, int image_height, vec3 pixel00_loc, vec3 pixel_delta_u, vec3 pixel_delta_v, vec3 camera_center)
+__global__ void build_world(hittable_list **d_world, hittable **d_objects)
 {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
-    if (i >= image_width || j >= image_height)
-        return;
-
-    int pixel_index = i + image_width * j;
-    auto pixel_center = pixel00_loc + (i * pixel_delta_u) + (j * pixel_delta_v);
-    auto ray_direction = pixel_center - camera_center;
-    ray r(camera_center, ray_direction);
-
-    color pixel_color = ray_color(r);
-
-    fb[pixel_index] = pixel_color;
+    if (i == 0 && j == 0)
+    {
+        d_objects[0] = new sphere(point3(0, 0, -1), 0.5);
+        d_objects[1] = new sphere(point3(0, -100.5, -1), 100);
+        *d_world = new hittable_list(d_objects, 2);
+    }
 }
 
-int main()
+// __global__ void free_world(hittable **d_objects, hittable_list **d_world)
+// {
+//     int i = threadIdx.x + blockIdx.x * blockDim.x;
+//     int j = threadIdx.y + blockIdx.y * blockDim.y;
+//     if (i == 0 && j == 0)
+//     {
+//         delete *(d_objects);
+//         delete *(d_objects + 1);
+//         // (*d_world)->free_all();
+//         delete *d_world;
+//     }
+// }
+
+__global__ void render(camera *d_cam, hittable_list **d_world)
 {
-    // Image
-    int image_width = 400;
-    auto aspect_ratio = 16.0 / 9.0;
-    int image_height = int(image_width / aspect_ratio);
-    image_height = (image_height < 1) ? 1 : image_height;
+    d_cam->start_render(d_world);
+}
 
-    int tx = 8;
-    int ty = 8;
-    int num_pixels = image_height * image_width;
-    size_t fb_size = 3 * num_pixels * sizeof(color);
-
-    color *fb;
-    checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
-
-    // Camera
-    auto focal_length = 1.0f;
-    auto viewport_height = 2.0f;
-    auto viewport_width = viewport_height * (double(image_width) / image_height);
-    auto camera_center = point3(0, 0, 0);
-
-    // Calculate the vectors across the horizontal and down the vertical viewport edges.
-    auto viewport_u = vec3(viewport_width, 0, 0);
-    auto viewport_v = vec3(0, -viewport_height, 0);
-
-    // Calculate the horizontal and vertical delta vectors from pixel to pixel.
-    auto pixel_delta_u = viewport_u / image_width;
-    auto pixel_delta_v = viewport_v / image_height;
-
-    // Calculate the location of the upper left pixel.
-    auto viewport_upper_left = camera_center - vec3(0, 0, focal_length) - viewport_u / 2 - viewport_v / 2;
-    auto pixel00_loc = viewport_upper_left + 0.5f * (pixel_delta_u + pixel_delta_v);
-
-    // Render
-    dim3 blocks(image_width / tx + 1, image_height / ty + 1);
-    dim3 threads(tx, ty);
-    render<<<blocks, threads>>>(fb, image_width, image_height, pixel00_loc, pixel_delta_u, pixel_delta_v, camera_center);
-    checkCudaErrors(cudaGetLastError());
-    checkCudaErrors(cudaDeviceSynchronize());
-
-    std::cout << "P3\n"
-              << image_width << ' ' << image_height << "\n255\n";
+void writeImage(color *fb, int image_width, int image_height)
+{
+    std::cout
+        << "P3\n"
+        << image_width << ' ' << image_height << "\n255\n";
 
     for (int j = 0; j < image_height; j++)
     {
@@ -105,8 +51,76 @@ int main()
             write_color(std::cout, pixel_color);
         }
     }
+}
 
+void print_mem_data()
+{
+    size_t free_byte;
+    size_t total_byte;
+    cudaError_t cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
+    double free_db = (double)free_byte;
+    double total_db = (double)total_byte;
+    double used_db = total_db - free_db;
+    std::clog << "GPU memory usage: used = " << used_db / 1024.0 / 1024.0
+              << ", free = " << free_db / 1024.0 / 1024.0 << " MB, total = " << total_db / 1024.0 / 1024.0 << " MB\n";
+}
+
+int main()
+{
+    float aspect_ratio = 16.0 / 9.0;
+    int image_width = 400;
+    int image_height = int(image_width / aspect_ratio);
+    image_height = (image_height < 1) ? 1 : image_height;
+    int num_pixels = image_height * image_width;
+    size_t fb_size = 3 * num_pixels * sizeof(color);
+
+    int tx = 8;
+    int ty = 8;
+    dim3 blocks(image_width / tx + 1, image_height / ty + 1);
+    dim3 threads(tx, ty);
+
+    // World
+    hittable_list **d_world;
+    hittable **d_objects;
+    checkCudaErrors(cudaMallocManaged(&d_world, sizeof(hittable_list *)));
+    checkCudaErrors(cudaMallocManaged(&d_objects, sizeof(hittable *) * 2));
+    build_world<<<1, 1>>>(d_world, d_objects);
+    checkCudaErrors(cudaGetLastError());
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    // Camera
+    camera *d_cam;
+    checkCudaErrors(cudaMallocManaged(&d_cam, sizeof(camera *)));
+
+    d_cam->aspect_ratio = aspect_ratio;
+    d_cam->image_width = image_width;
+    d_cam->image_height = image_height;
+    checkCudaErrors(cudaMallocManaged(&d_cam->fb, fb_size));
+    checkCudaErrors(cudaMallocManaged(&d_cam->rand_state, num_pixels * sizeof(curandState)));
+
+    // Render
+    std::clog << " Beginning Rendering\n";
+    auto render_start = std::chrono::high_resolution_clock::now();
+
+    render<<<blocks, threads>>>(d_cam, d_world);
+    checkCudaErrors(cudaGetLastError());
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    auto render_stop = std::chrono::high_resolution_clock::now();
+    auto render_duration = std::chrono::duration_cast<std::chrono::milliseconds>(render_stop - render_start);
+    std::clog << " Rendering complete in " << render_duration.count() << " milliseconds\n";
     std::clog << "\r Done.           \n";
 
-    checkCudaErrors(cudaFree(fb));
+    color *fb = (color *)malloc(fb_size);
+
+    cudaMemcpy(fb, d_cam->fb, fb_size, cudaMemcpyDeviceToHost);
+
+    writeImage(fb, image_width, image_height);
+
+    // Clean up
+    free(fb);
+    checkCudaErrors(cudaFree(d_cam));
+    checkCudaErrors(cudaFree(d_world));
+    checkCudaErrors(cudaFree(d_objects));
+    return 0;
 }
