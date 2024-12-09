@@ -9,11 +9,12 @@
 class camera
 {
 public:
-    float aspect_ratio = 1.0f; // Ratio of image width over height
-    int image_width = 100;     // Rendered image width in pixel count
-    int image_height = 100;          // Rendered image height in pixel count
-    color *fb;                 // Frame buffer to render image to
-    curandState *rand_state;   // RNG for the camera
+    float aspect_ratio = 1.0f;  // Ratio of image width over height
+    int image_width = 100;      // Rendered image width in pixel count
+    int image_height = 100;     // Rendered image height in pixel count
+    int samples_per_pixel = 10; // Count of random samples for each pixel
+    color *fb;                  // Frame buffer to render image to
+    curandState *rand_state;    // RNG for the camera
 
     __device__ void start_render(hittable_list **d_world)
     {
@@ -25,10 +26,11 @@ public:
     }
 
 private:
-    point3 center;      // Camera center
-    point3 pixel00_loc; // Location of pixel 0, 0
-    vec3 pixel_delta_u; // Offset to pixel to the right
-    vec3 pixel_delta_v; // Offset to pixel below
+    float pixel_samples_scale; // Color scale factor for a sum of pixel samples
+    point3 center;             // Camera center
+    point3 pixel00_loc;        // Location of pixel 0, 0
+    vec3 pixel_delta_u;        // Offset to pixel to the right
+    vec3 pixel_delta_v;        // Offset to pixel below
 
     // Initialize rand_states
     __device__ void init_rand_states()
@@ -44,13 +46,14 @@ private:
 
     __device__ void initialize()
     {
+        pixel_samples_scale = 1.0 / samples_per_pixel;
         center = point3(0, 0, 0);
 
         // Determine viewport dimensions
         auto focal_length = 1.0f;
         auto viewport_height = 2.0f;
         auto viewport_width = viewport_height * (float(image_width) / image_height);
-        
+
         // Calculate the vectors across the horizontal and down the vertical viewport edges.
         auto viewport_u = vec3(viewport_width, 0, 0);
         auto viewport_v = vec3(0, -viewport_height, 0);
@@ -76,13 +79,19 @@ private:
         int pixel_index = i + image_width * j;
         curandState local_rand_state = rand_state[pixel_index];
 
-        auto pixel_center = pixel00_loc + (i * pixel_delta_u) + (j * pixel_delta_v);
-        auto ray_direction = pixel_center - center;
-        ray r(center, ray_direction);
+        color pixel_color(0, 0, 0);
+        for (int sample = 0; sample < samples_per_pixel; sample++)
+        {
+            ray r = get_ray(i, j, local_rand_state);
+            // printf("ray: %f %f %f\n", r.direction().x(), r.direction().y(), r.direction().z());
+            pixel_color += ray_color(r, *world);
+        }
 
-        color pixel_color = ray_color(r, *world);
-
-        fb[pixel_index] = pixel_color;
+        // printf("cooler: %f %f %f\n", pixel_color.x(), pixel_color.y(), pixel_color.z());
+        color final = pixel_samples_scale * pixel_color;
+        // printf("scale: %f\n", pixel_samples_scale);
+        // printf("final: %f %f %f\n", final.x(), final.y(), final.z());
+        fb[pixel_index] = final;
     }
 
     __device__ color ray_color(const ray &r, const hittable *world)
@@ -96,6 +105,31 @@ private:
         vec3 unit_direction = unit_vector(r.direction());
         auto a = 0.5f * (unit_direction.y() + 1.0f);
         return (1.0f - a) * color(1.0f, 1.0f, 1.0f) + a * color(0.5f, 0.7f, 1.0f);
+    }
+
+    __device__ ray get_ray(int i, int j, curandState &rand_state) const
+    {
+        // Construct a camera ray originating from the origin and directed at randomly sampled
+        // point around the pixel location i, j.
+
+        auto offset = sample_square(rand_state);
+        // printf("offset: %f %f %f\n", offset.x(), offset.y(), offset.z());
+        
+        auto pixel_sample = pixel00_loc + ((i + offset.x()) * pixel_delta_u) + ((j + offset.y()) * pixel_delta_v);
+
+        auto ray_origin = center;
+        // printf("pix sample: %f %f %f\n", pixel_sample.x(), pixel_sample.y(), pixel_sample.z());
+        // printf("origin: %f %f %f\n", ray_origin.x(), ray_origin.y(), ray_origin.z());
+        auto ray_direction = pixel_sample - ray_origin;
+        // printf("direction: %f %f %f\n", ray_direction.x(), ray_direction.y(), ray_direction.z());
+
+        return ray(ray_origin, ray_direction);
+    }
+
+    // Returns the vector to a random point in the [-.5,-.5]-[+.5,+.5] unit square.
+    __device__ vec3 sample_square(curandState &rand_state) const
+    {
+        return vec3(random_float(rand_state) - 0.5f, random_float(rand_state) - 0.5f, 0);
     }
 };
 

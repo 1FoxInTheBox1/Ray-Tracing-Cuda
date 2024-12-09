@@ -95,6 +95,7 @@ int main()
     d_cam->aspect_ratio = aspect_ratio;
     d_cam->image_width = image_width;
     d_cam->image_height = image_height;
+    d_cam->samples_per_pixel = 100;
     checkCudaErrors(cudaMallocManaged(&d_cam->fb, fb_size));
     checkCudaErrors(cudaMallocManaged(&d_cam->rand_state, num_pixels * sizeof(curandState)));
 
@@ -116,6 +117,8 @@ int main()
     cudaMemcpy(fb, d_cam->fb, fb_size, cudaMemcpyDeviceToHost);
 
     writeImage(fb, image_width, image_height);
+
+    print_mem_data();
 
     // Clean up
     free(fb);
